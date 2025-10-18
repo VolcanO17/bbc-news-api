@@ -12,6 +12,9 @@ import dotenv
 import html
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote
+import sys
+sys.path.insert(0, 'C:\\Users\\VolcanO\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages')
+import bbc
 
 dotenv.load_dotenv()
 
@@ -314,14 +317,143 @@ def _get(lang, latest):
     response["timestamp"] = int(time.time())
     return response
 
-def get_eng(latest):
+def scrape_bbc_section(url, max_results=10):
+    """Scrape articles from a BBC section URL"""
+    print(f"Scraping BBC section: {url}")
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        articles = []
+
+        # Determine the URL pattern based on the section URL
+        if '/sport' in url:
+            url_pattern = lambda x: x and '/sport/' in x and len(x) > 20 and any(char.isdigit() for char in x)
+        elif '/news/technology' in url:
+            url_pattern = lambda x: x and ('/news/technology/' in x or '/news/articles/' in x) and len(x) > 20
+        elif '/news/science' in url:
+            url_pattern = lambda x: x and ('/news/science' in x or '/news/articles/' in x) and len(x) > 20
+        elif '/news/business' in url:
+            url_pattern = lambda x: x and ('/news/business/' in x or '/news/articles/' in x) and len(x) > 20
+        elif '/news/politics' in url:
+            url_pattern = lambda x: x and ('/news/politics/' in x or '/news/articles/' in x) and len(x) > 20
+        elif '/news/world' in url:
+            url_pattern = lambda x: x and ('/news/world/' in x or '/news/articles/' in x) and len(x) > 20
+        elif '/news/health' in url:
+            url_pattern = lambda x: x and ('/news/health/' in x or '/news/articles/' in x) and len(x) > 20
+        elif '/news/entertainment' in url:
+            url_pattern = lambda x: x and ('/news/entertainment' in x or '/news/articles/' in x) and len(x) > 20
+        else:
+            # Fallback for other sections
+            url_pattern = lambda x: x and ('/news/articles/' in x or '/sport/' in x) and len(x) > 20
+
+        # Find actual article links based on the section
+        article_links = soup.find_all('a', href=url_pattern)
+
+        # If no specific pattern matches, try a broader approach
+        if not article_links:
+            article_links = soup.find_all('a', href=lambda x: x and len(x) > 30 and ('/news/' in x or '/sport/' in x) and any(char.isdigit() for char in x))
+
+        seen_titles = set()
+        for link in article_links:
+            if len(articles) >= max_results:
+                break
+
+            href = link.get('href')
+            text = link.get_text().strip()
+
+            # Look for title in various places
+            title = ''
+
+            # Check if the link itself has text
+            if text and len(text) > 10:
+                title = text
+            else:
+                # Look in parent elements for title
+                parent = link.parent
+                for _ in range(3):  # Check up to 3 levels up
+                    if parent:
+                        h3 = parent.find('h3')
+                        if h3:
+                            title = h3.get_text().strip()
+                            break
+                        span = parent.find('span')
+                        if span and len(span.get_text().strip()) > 10:
+                            title = span.get_text().strip()
+                            break
+                        p = parent.find('p')
+                        if p and len(p.get_text().strip()) > 10:
+                            title = p.get_text().strip()
+                            break
+                    parent = parent.parent if parent else None
+
+            # Skip if title is too short, already seen, or is a section header
+            if not title or len(title) <= 15 or title in seen_titles:
+                continue
+
+            # Skip section headers and navigation
+            if any(skip in title.lower() for skip in ['video', 'more', 'also in', 'only from', 'insight', 'live', 'watch', 'listen']):
+                continue
+
+            seen_titles.add(title)
+
+            # Get full URL
+            if href.startswith('/'):
+                full_url = f"https://www.bbc.com{href}"
+            else:
+                full_url = href
+
+            # Look for summary in nearby elements
+            summary = ""
+            parent = link.parent
+            if parent:
+                p_elem = parent.find('p')
+                if p_elem:
+                    summary = p_elem.get_text().strip()
+
+            # Look for image in parent container
+            image_src = ""
+            if parent:
+                img_elem = parent.find('img')
+                if img_elem:
+                    if 'srcset' in img_elem.attrs and img_elem.attrs['srcset']:
+                        image_src = img_elem.attrs['srcset'].split(',')[0].split(' ')[0]
+                    else:
+                        image_src = img_elem.attrs.get('src', "")
+
+            articles.append({
+                "title": title,
+                "summary": summary,
+                "image": image_src,
+                "link": full_url
+            })
+
+        print(f"Found {len(articles)} articles for {url}")
+        return articles
+
+    except Exception as e:
+        print(f"Error scraping BBC section {url}: {e}")
+        return []
+
+def get_eng(bbc_url='https://www.bbc.com/', latest=False):
     response = {}
     start = time.time()
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        r = requests.get('https://www.bbc.com/', headers=headers, timeout=10)
+        r = requests.get(bbc_url, headers=headers, timeout=10)
 
         if r.status_code != 200:
             response["status"] = 503
@@ -449,12 +581,85 @@ def news():
     try:
         # Get parameters (GNews-compatible)
         query = request.args.get('q', '')
-        topic = request.args.get('topic', '')
+        topic = request.args.get('topic', '').lower()
         country = request.args.get('country', 'GB')  # Default to GB for BBC
         language = request.args.get('language', 'en')
         max_results = int(request.args.get('max_results', 10))
 
-        # Fetch BBC news data
+        # Use direct BBC scraping for category-based news to ensure proper categorization
+        if topic and topic != 'general':
+            # Map topic to specific BBC section URLs for accurate categorization
+            url_mapping = {
+                'technology': 'https://www.bbc.com/news/technology',
+                'science': 'https://www.bbc.com/news/science_and_environment',
+                'business': 'https://www.bbc.com/news/business',
+                'politics': 'https://www.bbc.com/news/politics',
+                'world': 'https://www.bbc.com/news/world',
+                'health': 'https://www.bbc.com/news/health',
+                'entertainment': 'https://www.bbc.com/news/entertainment_and_arts',
+                'sports': 'https://www.bbc.com/sport',
+                'geopolitics': 'https://www.bbc.com/news/world',
+                'stock_market': 'https://www.bbc.com/news/business',
+                'food': 'https://www.bbc.com/news/world',
+                'defense': 'https://www.bbc.com/news/world',
+            }
+
+            section_url = url_mapping.get(topic, 'https://www.bbc.com/news')
+
+            print(f"Topic: {topic}, URL: {section_url}")
+            try:
+                # Scrape the specific BBC section
+                section_data = scrape_bbc_section(section_url, max_results)
+                print(f"Section articles scraped: {len(section_data)}")
+
+                # Transform to GNews format
+                articles = []
+                for article_data in section_data:
+                    article = {
+                        'title': article_data.get('title', ''),
+                        'description': article_data.get('summary', ''),
+                        'url': article_data.get('link', ''),
+                        'urlToImage': get_article_image(article_data.get('link', '')),
+                        'publishedAt': datetime.now(pytz.timezone("Asia/Dhaka")).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                        'author': 'BBC News',
+                        'source': 'BBC News',
+                        'category': topic,
+                        'region': 'global',
+                        'tags': [topic.lower()],
+                        'readTime': len(article_data.get('summary') or '') // 200 + 1,
+                        'aiSummary': ''
+                    }
+
+                    # Apply query filter if specified
+                    if query:
+                        search_text = (article['title'] + ' ' + article['description']).lower()
+                        if query.lower() not in search_text:
+                            continue
+
+                    articles.append(article)
+
+                print(f"Articles created: {len(articles)}")
+                if articles:
+                    return jsonify({'articles': articles})
+
+            except Exception as scrape_e:
+                print(f"Scraping failed for topic {topic}: {scrape_e}, falling back to general scraping")
+
+        # Fallback: For general or unknown topics, use the existing scraping method
+        bbc_data = get_eng(False)  # Get all sections
+
+        if bbc_data.get('status') != 200:
+            return jsonify({'error': 'Failed to fetch BBC news'}), 500
+
+        # Transform BBC data to GNews format
+        articles = transform_bbc_to_gnews_format(bbc_data, query, topic, max_results)
+
+        if not articles:
+            return jsonify({'error': 'No articles found'}), 404
+
+        return jsonify({'articles': articles})
+
+        # Fallback: For general or unknown topics, use the existing scraping method
         bbc_data = get_eng(False)  # Get all sections
 
         if bbc_data.get('status') != 200:
@@ -495,25 +700,8 @@ def transform_bbc_to_gnews_format(bbc_data, query, topic, max_results):
     """Transform BBC API response to GNews article format"""
     articles = []
 
-    # Map topic to BBC sections
-    topic_mapping = {
-        'general': ['Latest', 'Top Stories'],
-        'technology': ['Technology'],
-        'science': ['Science'],
-        'business': ['Business'],
-        'politics': ['Politics'],
-        'world': ['World'],
-        'health': ['Health'],
-        'entertainment': ['Entertainment'],
-        'sports': ['Sport'],
-        'geopolitics': ['World', 'Politics'],
-    }
-
-    # Get relevant sections based on topic
-    relevant_sections = topic_mapping.get(topic.lower(), list(bbc_data.keys()))
-
     # Filter out non-section keys
-    relevant_sections = [s for s in relevant_sections if s in bbc_data and isinstance(bbc_data[s], list)]
+    relevant_sections = [s for s in bbc_data.keys() if isinstance(bbc_data[s], list)]
 
     article_count = 0
 
